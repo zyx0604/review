@@ -8,14 +8,93 @@
  通常的一个做法是：我们在构造函数的时候申请资源，在析构函数的时候释放资源。这也就是我们常说的RAII（资源获取即初始化）
 
 3 std::shared_ptr
-  描述：使用引用计数记录有多少个shared_ptr共同指向同一个对象，当引用计数变为0的时候将对象自动删除。
+ 【描述】：使用引用计数记录有多少个shared_ptr共同指向同一个对象，当引用计数变为0的时候将对象自动删除。
   引用计数，不是垃圾回收，引用计数能够尽快收回不再被使用的对象，同时在回收的时候也不会造成长时间的等待，更能够清洗明确的表名资源的生命周期。
   
-  源码分析：
-    
-  
- 如何使用？
- （1）尽量使用std::make_sherad，它会创建对象，并返回这个对象的shared_ptr，避免显示的使用new。
-    --> std::make_sherad的实现原理：使用了完美转发和可变参数模板。可变参数模板可以适配多个参数构造函数的调用。而完美转发可以保障参数可以左右值属性不变的传给对象的构造函数。
-    【参考】https://blog.csdn.net/CPriLuke/article/details/79462791
- （2）
+ 【源码分析】：
+    https://blog.csdn.net/program_anywhere/article/details/78204676
+   
+ 【如何使用】
+   （1）尽量使用std::make_sherad，它会创建对象，并返回这个对象的shared_ptr，避免显示的使用new。
+      --> std::make_sherad的实现原理：使用了完美转发和可变参数模板。可变参数模板可以适配多个参数构造函数的调用。而完美转发可以保障参数可以左右值属性不变的传给对象的构造函数。
+      【参考】https://blog.csdn.net/CPriLuke/article/details/79462791
+   （2）慎用裸指针：
+      如:
+       {
+         int* p = new int(100);
+         {
+           std::shared_ptr<int> s_ptr(p);  // 参数是一个裸指针，退出作用域就会被释放
+         }
+         *p = 45; // 这里存在不可预料的问题，因为p已经被释放掉了
+       }
+   （3）慎用get()返回指针：
+     如：
+       {
+         std::shared_ptr<int> s_ptr(new int(100));
+         int* p = s_ptr.get();
+         delete p; // 不可以删除，否则会导致double free
+       }
+     再如：
+      {
+        std::shared_ptr<int> s_ptr(new int(100));
+        int* p = s_ptr.get();
+        {
+          std::shared_ptr<int> s_ptr_2(p); // 错误，此时有两个智能指针指向p，释放时，会导致double free
+        }
+      }
+   （4）不要把类对象指针（this）作为shared_ptr返回，改用enable_shared_from_this（其工作原理实际就是弱指针的使用）
+    如：
+     {
+        class CL : public enable_shared_from_this<CL> {
+        public:
+          std::shared_ptr<CL> get_self() {
+            return shared_from_this(); // 这个是enable_shared_from_this中的方法
+          }
+        };
+
+        int main() {
+          std::shared_ptr<CL> p_ptr(new CL);
+          std::shared_ptr<CL> p_ptr_2 = p_ptr->get_self();
+          std::cout << p_ptr_2.use_count() << std::endl; // 2
+          // 说明：如果get_self使用裸指针的话，会导致两个智能指针引用一个指针，最终double free。
+          // 现在我们使用标准库的类模板：enable_shared_from_this：
+          //  这种方式，在外面创建CL的智能指针和通过CL对象返回的this智能指针都是安全的。
+          //  原因是：enable_shared_from_this 中有一个弱指针weak_ptr，这个弱指针能够监视this
+          //    在我们调用shared_from_this()这个方法时，这个方法内部实际上是调用weak_ptr的lock方法
+          //    大家都知道lock方法会让shared_ptr指针引用计数加1，同时返回这个shared_ptr。
+          return 0;
+        }
+     }
+  （5）避免循环引用
+    class CB;
+    class CA {
+    public:
+      std::shared_ptr<CB> m_pb;
+      ~CA() {
+        std::cout << "~CA()" << std::endl;
+      }
+    };
+
+    class CB {
+    public:
+      // std::shared_ptr<CA> m_pa;
+      std::weak_ptr<CA> m_pa;
+      ~CB() {
+        std::cout << "~CB()" << std::endl;
+      }
+    };
+
+    int main() {
+      std::shared_ptr<CA> p_ca(new CA);
+      std::shared_ptr<CB> p_cb(new CB);
+      p_ca->m_pb = p_cb; // 指向CB对象的有了两个强引用
+      p_cb->m_pa = p_ca; // 指向CA的只有一个强引用，另外一个是弱引用
+      // 离开作用域后，p_ca 的引用计数从1变成0，会释放CA对象。
+      // CA的析构函数执行，会导致其内部的m_pb释放，CB的被引用计数变为1
+      // 离开作用域后，p_cb 的引用计数再减一，从而释放CB对象。
+    }
+     
+ 【性能问题】
+   裸指针：4个字节。
+   shared_ptr、weak_ptr都是裸指针的两倍大小。
+   （1）其中第一个
